@@ -21,7 +21,13 @@
  *     in Python using the GX/GY LUTs.
  *     Returns 0 on success, -1 on bad payload length.
  *
- * Both functions are thread-safe (no global mutable state).
+ *   decode_strip_2048(payload, payload_len, strip_out)
+ *     Identical interface, same shape — for the 2048x1024 4-HYB detector
+ *     the HYB local geometry is identical (1024x512); the global placement
+ *     is done in Python using the GX/GY LUTs.
+ *     Returns 0 on success, -1 on bad payload length.
+ *
+ * All three functions are thread-safe (no global mutable state).
  *
  * Memory layout of strip_out[local_y][x_step]:
  *   local_y = (7 - ADC_TO_ASIC[adc]) * 64 + mux
@@ -59,9 +65,9 @@ static const int Y_BASE[8]      = {
 };
 
 /*
- * decode_strip_512 / decode_strip_1024
+ * decode_strip_512 / decode_strip_1024 / decode_strip_2048
  *
- * Both have identical ADC geometry — they differ only in header parsing
+ * All have identical ADC geometry — they differ only in header parsing
  * (hyb_num field) which is handled in Python.  The strip decode is the
  * same for all HYBs.
  *
@@ -110,6 +116,13 @@ int decode_strip_512(const uint8_t  *payload,
 }
 
 int decode_strip_1024(const uint8_t *payload,
+                      int            payload_len,
+                      uint16_t      *strip_out)
+{
+    return _decode_strip(payload, payload_len, strip_out);
+}
+
+int decode_strip_2048(const uint8_t *payload,
                       int            payload_len,
                       uint16_t      *strip_out)
 {

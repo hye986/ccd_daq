@@ -84,7 +84,7 @@ Usage
   # Record all frames:
   python udp_recorder.py --output run001.h5
 
-  # 1024x1024 mode, Poisson trigger at 10 Hz:
+  # 2048x1024 mode, Poisson trigger at 10 Hz:
   python udp_recorder.py --mode 1024 --trigger poisson --trigger-rate 10 --output run002.h5
 
   # With pedestal subtraction (better compression):
@@ -102,7 +102,7 @@ Usage
   # RAW-only, keeping incomplete frames:
   python udp_recorder.py --raw-only --raw-output run004.raw --keep-incomplete
 
-  # Per-HYB 512x512 RAW output for all four HYBs (alongside HDF5):
+  # Per-HYB 1024x512 RAW output for all four HYBs (alongside HDF5):
   python udp_recorder.py --output run005.h5 --hyb-raw-output run005_{H}.raw
   # Produces: run005_H0.raw, run005_H1.raw, run005_H2.raw, run005_H3.raw
 
@@ -121,7 +121,7 @@ Usage
   #   | bot-left | bot-right|
   #   +----------+----------+
   # H0=hyb0, H1=hyb1, H2=hyb2, H3=hyb3.
-  # Each 512×512 RAW file: line 0 = frame_marker (0xFFFF) + ADC + 512 pixels,
+  # Each 1024×512 RAW file: line 0 = frame_marker (0xFFFF) + ADC + 512 pixels,
   #                        lines 1-511 = line_marker (0xFFFE) + ADC + 512 pixels.
 
   # Check for data loss:
@@ -161,16 +161,17 @@ DATA_OFF  = 64
 N_X_PER_PACKET = 8
 N_MUX          = 64
 N_ADC          = 8
-HYB_SIZE       = 512
+HYB_LOCAL_Y    = 512   # local_y range (unchanged)
+HYB_LOCAL_X     = 1024  # local_x range (doubled for 2048x1024 mode)
 TOTAL_LEN      = 8256   # 64-byte header + 8192-byte data
 
 ADC_TO_ASIC = [3, 1, 2, 0, 5, 4, 7, 6]
 ADC_Y_BASE  = [(7 - ADC_TO_ASIC[a]) * 64 for a in range(N_ADC)]
 
-_ly = np.arange(HYB_SIZE, dtype=np.int32)
-GY_LUT = np.stack([ 512+_ly, _ly, 511-_ly, 1023-_ly ])
-_lx = np.arange(HYB_SIZE, dtype=np.int32)
-GX_LUT = np.stack([ 512+_lx, 512+_lx, 511-_lx, 511-_lx ])
+_ly = np.arange(HYB_LOCAL_Y, dtype=np.int32)
+GY_LUT = np.stack([ 512+_ly, _ly, 511-_ly, 1023-_ly ])  # (4, 512)
+_lx = np.arange(HYB_LOCAL_X, dtype=np.int32)
+GX_LUT = np.stack([ 1024+_lx, 1024+_lx, 1023-_lx, 1023-_lx ])  # (4, 1024)
 
 #  tunable defaults 
 SOCK_RCVBUF    = 256 * 1024 * 1024   # 256 MB kernel buffer request
@@ -205,27 +206,27 @@ def _serialise_raw_frames(frames):
 
 # HYB sub-matrix extraction helpers
 # ------------------------------------
-# The 1024×1024 frame is assembled from 4 HYBs (hyb 0-3):
-#   H0 (hyb=0): top-right    — rows 512-1023, cols 512-1023
-#   H1 (hyb=1): bottom-right — rows 0-511,    cols 512-1023
-#   H2 (hyb=2): bottom-left  — rows 0-511,    cols 0-511
-#   H3 (hyb=3): top-left     — rows 512-1023, cols 0-511
+# The 2048×1024 frame is assembled from 4 HYBs (hyb 0-3):
+#   H0 (hyb=0): top-right    — rows 512-1023, cols 1024-2047
+#   H1 (hyb=1): bottom-right — rows 0-511,    cols 1024-2047
+#   H2 (hyb=2): bottom-left  — rows 0-511,    cols 0-1023
+#   H3 (hyb=3): top-left     — rows 512-1023, cols 0-1023
 #
-# GX_LUT[hyb] and GY_LUT[hyb] map local HYB line index 0..511 to global
+# GX_LUT[hyb] and GY_LUT[hyb] map local HYB line index 0..1023 to global
 # frame column and row respectively.  Using these LUTs to index the frame
 # guarantees correct readout order (including any mirroring) regardless of
 # the physical charge-transfer direction.
 #
 # In the RAW sub-file each "line" is one local HYB column (512 pixels tall),
-# read out in local line order 0→511 (matching the LUT index).  Line 0 gets
+# read out in local line order 0→1023 (matching the LUT index).  Line 0 gets
 # the frame marker (0xFFFF); subsequent lines get the line marker (0xFFFE).
 
 def _serialise_raw_hyb(frames, hyb):
-    """Serialise (B, 1024, 1024) frames to RAW for a single 512×512 HYB.
+    """Serialise (B, 2048, 1024) frames to RAW for a single 1024×512 HYB.
 
     Parameters
     ----------
-    frames : ndarray, shape (B, 1024, 1024), dtype uint16
+    frames : ndarray, shape (B, 2048, 1024), dtype uint16
         Full assembled frames.
     hyb : int
         HYB index 0-3 (H0=top-right, H1=bottom-right,
@@ -237,16 +238,16 @@ def _serialise_raw_hyb(frames, hyb):
         RAW-format bytes for B frames of this HYB.
     """
     B = frames.shape[0]
-    N_LINE = HYB_SIZE   # 512 lines (columns in HYB coordinates)
-    N_PIX  = HYB_SIZE   # 512 pixels per line (rows in HYB coordinates)
+    N_LINE = HYB_LOCAL_X   # 1024 lines (columns = local_x) (columns in HYB coordinates)
+    N_PIX  = HYB_LOCAL_Y   # 512 pixels per line (rows = local_y) per line (rows in HYB coordinates)
 
-    # GY_LUT[hyb]: shape (512,) — global row index for each HYB local line
-    # GX_LUT[hyb]: shape (512,) — global col index for each HYB local line
-    gy = GY_LUT[hyb]        # (512,)  global row indices, pixel order 0→511
-    gx = GX_LUT[hyb][::-1] # (512,)  global col indices, REVERSED so that
+    # GY_LUT[hyb]: shape (1024,) — global row index for each HYB local line
+    # GX_LUT[hyb]: shape (1024,) — global col index for each HYB local line
+    gy = GY_LUT[hyb]        # (1024,)  global row indices, pixel order 0→1023
+    gx = GX_LUT[hyb][::-1] # (1024,)  global col indices, REVERSED so that
     # local line 0 = outermost column = first UDP line_num=0x0000:
-    #   H0/H1: line 0 → x=1023, line 511 → x=512
-    #   H2/H3: line 0 → x=0,    line 511 → x=511
+    #   H0/H1: line 0 → x=2047, line 1023 → x=1024
+    #   H2/H3: line 0 → x=0,    line 1023 → x=1023
 
     # Extract (B, N_LINE, N_PIX): for each frame, for each local line l,
     # pixel p is frames[b, gy[p], gx[l]]   -- rows vary along pixel axis,
@@ -308,14 +309,14 @@ def rx_thread_fn(sock, pkt_queue, stop_event, stats):
 # Two variants:
 #
 #   _make_decode_thread()      — standard path.
-#     Assembles complete 1024×1024 (or 512×512) frames and pushes them to
+#     Assembles complete 1024×1024 or 2048×1024 (or 512×512) frames and pushes them to
 #     frm_queue for the writer thread to handle (.h5 / full-frame .raw /
 #     per-HYB .raw via _serialise_raw_hyb).
 #
 #   _make_decode_thread_direct() — UDP-direct HYB path (1024 mode only).
 #     Splits the pkt_queue fan-out across two co-operating threads:
 #       • hyb_writer_thread  reads pkt_queue, writes per-HYB .raw files
-#         directly from decoded strips — no 1024×1024 frame is assembled,
+#         directly from decoded strips — (no 1024×1024 or 2048×1024 frame is assembled,
 #         non-selected HYBs are skipped after header-only parsing.
 #       • frame_assemble_thread  reads the same pkt_queue via a second
 #         queue (relay_queue) and assembles full frames for frm_queue only
@@ -336,7 +337,7 @@ def rx_thread_fn(sock, pkt_queue, stop_event, stats):
 def _make_decode_thread(mode, decode_pkt, pkt_queue, frm_queue,
                         stop_event, stats, save_every):
     """
-    Standard decode thread factory for '512' or '1024' mode.
+    Standard decode thread factory for '512', '1024', or '2048' mode.
 
     Frame subsampling (save_every=N):
       Every packet: parse 6-byte header only (~2 µs) to track frame32
@@ -352,13 +353,14 @@ def _make_decode_thread(mode, decode_pkt, pkt_queue, frm_queue,
       of exactly save_every is the expected subsampling gap.
     """
     is_1024 = (mode == '1024')
-    H = 1024 if is_1024 else HYB_SIZE
-    W = 1024 if is_1024 else HYB_SIZE
+    is_2048 = (mode == '2048')
+    H = 1024 if (is_1024 or is_2048) else HYB_SIZE
+    W = 2048 if is_2048 else (1024 if is_1024 else HYB_SIZE)
 
     def _thread():
         work         = np.zeros((H, W), dtype=np.uint16)
-        got_x        = (np.zeros((4, HYB_SIZE), dtype=bool) if is_1024
-                        else np.zeros(HYB_SIZE, dtype=bool))
+        got_x        = (np.zeros((4, HYB_LOCAL_X), dtype=bool) if (is_1024 or is_2048)
+                        else np.zeros(HYB_LOCAL_Y, dtype=bool))
         cur_f32      = None
         cur_ts       = None
         prev_any_f32 = None
@@ -435,20 +437,20 @@ def _make_decode_thread(mode, decode_pkt, pkt_queue, frm_queue,
                 continue
 
             try:
-                if is_1024:
+                if is_1024 or is_2048:
                     _, hyb, local_x0, strip = decode_pkt(payload)
                     if not (0 <= hyb < 4):
                         continue
                     gy  = GY_LUT[hyb]
                     lxs = local_x0 - np.arange(N_X_PER_PACKET, dtype=np.int32)
-                    vld = (lxs >= 0) & (lxs < HYB_SIZE)
+                    vld = (lxs >= 0) & (lxs < HYB_LOCAL_X)
                     gxs = GX_LUT[hyb, lxs[vld]]
                     work[gy[:,None], gxs[None,:]] = strip[:, vld]
                     got_x[hyb, lxs[vld]] = True
                 else:
                     _, x0, strip = decode_pkt(payload)
                     lxs = x0 - np.arange(N_X_PER_PACKET, dtype=np.int32)
-                    vld = (lxs >= 0) & (lxs < HYB_SIZE)
+                    vld = (lxs >= 0) & (lxs < HYB_LOCAL_X)
                     work[:, lxs[vld]] = strip[:, vld]
                     got_x[lxs[vld]]   = True
             except Exception:
@@ -463,7 +465,7 @@ def _make_decode_thread_direct(decode_pkt, pkt_queue, frm_queue,
                                skip_incomplete, max_frames,
                                need_frames):
     """
-    UDP-direct HYB writer + optional frame assembler (1024 mode only).
+    UDP-direct HYB writer + optional frame assembler (1024/2048 mode only).
 
     Returns (hyb_writer_fn, frame_assemble_fn | None, relay_queue | None).
 
@@ -474,7 +476,7 @@ def _make_decode_thread_direct(decode_pkt, pkt_queue, frm_queue,
         Passed explicitly so this factory has no dependency on args.
     need_frames : bool
         If True, every packet is also relayed to relay_queue so the
-        frame assembler can build full 1024×1024 frames for .h5 /
+        frame assembler can build full 1024×1024 or 2048×1024 frames for .h5 /
         full-frame .raw output.  If False, relay_queue is None and
         the frame assembler thread is not started.
     """
@@ -485,20 +487,20 @@ def _make_decode_thread_direct(decode_pkt, pkt_queue, frm_queue,
     relay_queue = queue.Queue(maxsize=PKT_QUEUE_SIZE) if need_frames else None
 
     # ── per-HYB line buffers ──────────────────────────────────────────
-    # buf[hyb] : shape (512, 512) uint16
+    # buf[hyb] : shape (1024, 1024) uint16 for 2048 mode
     #   axis 0 = local_y (row), axis 1 = line_num (column/line index)
-    hyb_bufs  = {hyb: np.zeros((HYB_SIZE, HYB_SIZE), dtype=np.uint16)
+    hyb_bufs  = {hyb: np.zeros((HYB_LOCAL_Y, HYB_LOCAL_X), dtype=np.uint16)
                   for hyb in selected_hybs}
     # Track which line_nums have been received for completeness check
-    hyb_got   = {hyb: np.zeros(HYB_SIZE, dtype=bool)
+    hyb_got   = {hyb: np.zeros(HYB_LOCAL_X, dtype=bool)
                   for hyb in selected_hybs}
     # Map hyb → (file_handle, name) for writing
     hyb_to_file = {hyb: (fh, name)
                    for name, (fh, hyb) in hyb_files.items()}
 
-    # RAW record dtype: marker(2) + adc(4) + 512×uint16 pixels
+    # RAW record dtype: marker(2) + adc(4) + 1024×uint16 pixels (2048 mode)
     _rec_dtype = np.dtype([('marker', '<u2'), ('adc', '<u4'),
-                           ('pix', '<u2', (HYB_SIZE,))])
+                           ('pix', '<u2', (HYB_LOCAL_Y,))])
     max_f = max_frames
 
     def _flush_hyb(hyb):
@@ -507,7 +509,7 @@ def _make_decode_thread_direct(decode_pkt, pkt_queue, frm_queue,
         buf = hyb_bufs[hyb]
         # Note: pedestal subtraction is not supported in the UDP-direct HYB
         # path. Use the .h5 path if pedestal correction is needed.
-        records = np.empty(HYB_SIZE, dtype=_rec_dtype)
+        records = np.empty(HYB_LOCAL_X, dtype=_rec_dtype)
         records['marker']    = RAW_LINE_MARKER
         records['marker'][0] = RAW_FRAME_MARKER
         records['adc']       = 0
@@ -629,9 +631,9 @@ def _make_decode_thread_direct(decode_pkt, pkt_queue, frm_queue,
                 continue
 
             # Place 8 columns into the line buffer
-            # strip shape: (HYB_SIZE, N_X_PER_PACKET) = (512, 8)
+            # strip shape: (HYB_LOCAL_Y, N_X_PER_PACKET) = (512, 8)
             # line_num is the first column of this group (0, 8, 16 ... 504)
-            col_end = min(line_num + N_X_PER_PACKET, HYB_SIZE)
+            col_end = min(line_num + N_X_PER_PACKET, HYB_LOCAL_X)
             n_cols  = col_end - line_num
             hyb_bufs[hyb][:, line_num:col_end] = strip[:, :n_cols]
             hyb_got[hyb][line_num:col_end]      = True
@@ -651,10 +653,10 @@ def _make_decode_thread_direct(decode_pkt, pkt_queue, frm_queue,
         def frame_assemble_fn():
             """
             Read relay_queue (fed by hyb_writer_fn) and assemble full
-            1024×1024 frames for frm_queue (→ writer_thread_fn).
-            Identical logic to _make_decode_thread for 1024 mode.
+            1024×1024 or 2048×1024 frames for frm_queue (→ writer_thread_fn).
+            Identical logic to _make_decode_thread for 1024/2048 mode.
             """
-            work         = np.zeros((1024, 1024), dtype=np.uint16)
+            work         = np.zeros((1024, 2048), dtype=np.uint16)
             got_x        = np.zeros((4, HYB_SIZE), dtype=bool)
             cur_f32      = None
             cur_ts       = None
@@ -738,7 +740,7 @@ def _make_decode_thread_direct(decode_pkt, pkt_queue, frm_queue,
                         continue
                     gy  = GY_LUT[hyb_d]
                     lxs = local_x0 - np.arange(N_X_PER_PACKET, dtype=np.int32)
-                    vld = (lxs >= 0) & (lxs < HYB_SIZE)
+                    vld = (lxs >= 0) & (lxs < HYB_LOCAL_X)
                     gxs = GX_LUT[hyb_d, lxs[vld]]
                     work[gy[:, None], gxs[None, :]] = strip[:, vld]
                     got_x[hyb_d, lxs[vld]] = True
@@ -1242,7 +1244,7 @@ def check_loss(path):
 
 def show_config(args):
     lib, path = _load_c_lib()
-    n_pkt = 64 if args.mode == '512' else 256
+    n_pkt = {512: 64, 1024: 256, 2048: 512}.get(int(args.mode), 64)
     fps   = 300
     total_pps = fps * n_pkt
 
@@ -1322,7 +1324,7 @@ def main():
     ap.add_argument('--show-config', action='store_true',
                     help='Show throughput analysis and exit')
 
-    ap.add_argument('--mode',        choices=['512','1024'], default='1024')
+    ap.add_argument('--mode',        choices=['512','1024','2048'], default="1024")
     ap.add_argument('--bind-ip',     default='127.0.0.1')
     ap.add_argument('--port',        type=int, default=5000)
 
@@ -1336,7 +1338,7 @@ def main():
     ap.add_argument('--raw-only',    action='store_true',
                     help='Write only RAW output; do not create an HDF5 file')
     ap.add_argument('--hyb-raw-output', metavar='PATTERN', default=None,
-                    help='Write per-HYB 512x512 RAW files. PATTERN must contain '
+                    help='Write per-HYB 1024x512 RAW files. PATTERN must contain '
                          '{H} which is replaced by the HYB name, e.g. '
                          '"run001_H{H}.raw" produces run001_HH0.raw, run001_HH1.raw, '
                          'etc. Use --hyb-select to choose which HYBs to write '
@@ -1376,7 +1378,7 @@ def main():
         show_config(args)
         return
 
-    height = width = 512 if args.mode == '512' else 1024
+    height = width = 512 if args.mode == '512' else (1024 if args.mode == '1024' else 2048)
 
     if args.raw_only and not args.raw_output and not args.hyb_raw_output:
         print("Error: --raw-only requires --raw-output and/or --hyb-raw-output")
@@ -1396,9 +1398,9 @@ def main():
     hyb_hyb_map = {'H0': 0, 'H1': 1, 'H2': 2, 'H3': 3}
     selected_hybs = []   # list of (name, hyb_index) for chosen HYBs
     if args.hyb_raw_output:
-        if args.mode != '1024':
+        if args.mode not in ('1024', '2048'):
             print("Error: --hyb-raw-output requires --mode 1024 "
-                  "(per-HYB output is only defined for the full 1024×1024 sensor).")
+                  "(per-HYB output is only defined for the full 1024×1024 or 2048×1024 sensor).")
             return
         if '{H}' not in args.hyb_raw_output:
             print("Error: --hyb-raw-output PATTERN must contain {H}, "
@@ -1464,12 +1466,12 @@ def main():
     #  routing decision ───────────────────────────────────────────────────
     # Direct HYB path: used when per-HYB .raw output is requested in 1024
     # mode.  Packets for selected HYBs are decoded and written directly from
-    # the decode thread, bypassing the full 1024×1024 frame assembly.
+    # the decode thread, bypassing the full 1024×1024 or 2048×1024 frame assembly.
     # A frame assembler relay is added only when .h5 or full-frame .raw is
     # also needed.
     #
     # Standard path: everything else (512 mode, no HYB raw, etc.).
-    use_direct = (selected_hybs and args.mode == '1024')
+    use_direct = (selected_hybs and args.mode in ('1024', '2048'))
 
     # need_frames: does the writer thread need assembled frames?
     need_frames = (not args.raw_only or args.raw_output)  # .h5 or full-frame .raw

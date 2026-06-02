@@ -1,43 +1,43 @@
 #!/usr/bin/env python3
 """
-udp_mock_sender_1024.py
+udp_mock_sender_2048.py
 
-1024x1024 CCD mock UDP sender composed of four 512x512 hybrids (HYBs).
+2048x1024 CCD mock UDP sender composed of four 1024x512 hybrids (HYBs).
 
 Global coordinate system
 ------------------------
-  (X, Y):  X = 0..1023  horizontal  (left=0,   right=1023)
+  (X, Y):  X = 0..2047  horizontal  (left=0,   right=2047)
             Y = 0..1023  vertical    (bottom=0, top=1023)
 
 HYB layout and local-to-global mapping
 ---------------------------------------
   All HYBs share the same local readout convention:
-    local_x = 0..511  (511 = ASIC side, 0 = far side)
-    local_y = 0..511  (ASIC k covers local_y = (7-k)*64 .. (7-k)*64+63)
+    local_x = 0..1023  (1023 = ASIC side, 0 = far side)
+    local_y = 0..511    (ASIC k covers local_y = (7-k)*64 .. (7-k)*64+63)
     ASIC0 -> local_y = 448-511  (local top)
     ASIC7 -> local_y = 0-63    (local bottom)
-    line_num = 511 - local_x0   (0 = first packet, ASIC side)
-    Rolling shutter: local_x0 starts at 511 (line_num=0), steps down to 0.
+    line_num = 1023 - local_x0   (0 = first packet, ASIC side)
+    Rolling shutter: local_x0 starts at 1023 (line_num=0), steps down to 0.
 
-  HYB0: X=512-1023, Y=512-1023   ASICs on RIGHT (X=1023)
-    global X =  512 + local_x
-    global Y =  512 + local_y
+  HYB0: X=1024-2047, Y=512-1023   ASICs on RIGHT (X=2047)
+    global X =  1024 + local_x
+    global Y =   512 + local_y
 
-  HYB1: X=512-1023, Y=0-511      ASICs on RIGHT (X=1023)
-    global X =  512 + local_x
-    global Y =    0 + local_y
+  HYB1: X=1024-2047, Y=0-511      ASICs on RIGHT (X=2047)
+    global X =  1024 + local_x
+    global Y =     0 + local_y
 
-  HYB2: X=0-511,   Y=0-511       ASICs on LEFT (X=0), 180-deg rotated
-    global X =  511 - local_x
-    global Y =  511 - local_y
+  HYB2: X=0-1023,   Y=0-511       ASICs on LEFT (X=0), 180-deg rotated
+    global X =  1023 - local_x
+    global Y =   511 - local_y
 
-  HYB3: X=0-511,   Y=512-1023    ASICs on LEFT (X=0), 180-deg rotated
-    global X =  511 - local_x
-    global Y = 1023 - local_y
+  HYB3: X=0-1023,   Y=512-1023    ASICs on LEFT (X=0), 180-deg rotated
+    global X =  1023 - local_x
+    global Y =  1023 - local_y
 
-  Verification (ASIC0, local_y=448-511, line_num=0 i.e. local_x=511):
-    HYB0: X=1023,   Y=960-1023  (top-right quadrant, top strip)      ✓
-    HYB1: X=1023,   Y=448-511   (bottom-right quadrant, top strip)   ✓
+  Verification (ASIC0, local_y=448-511, line_num=0 i.e. local_x=1023):
+    HYB0: X=2047,   Y=960-1023  (top-right quadrant, top strip)      ✓
+    HYB1: X=2047,   Y=448-511   (bottom-right quadrant, top strip)   ✓
     HYB2: X=0,      Y=0-63      (bottom-left quadrant, bottom strip)  ✓
     HYB3: X=0,      Y=512-575   (top-left quadrant, bottom strip)    ✓
 
@@ -46,7 +46,7 @@ UDP payload  (8256 bytes = 64-byte header + 8192-byte data)
   Header (64 bytes):
     Bytes  0-16  PREFIX       (17 bytes, fixed magic)
     Bytes 17-27  MID_PADDING  (11 bytes, fixed)
-    Bytes 28-29  line_num     uint16-LE = 511 - local_x0
+    Bytes 28-29  line_num     uint16-LE = 1023 - local_x0
     Bytes 30-33  frame32      uint16-LE x2: frame_a=lo16, frame_b=hi16
     Bytes 34-35  2 zero bytes
     Bytes 36-37  hyb_num      uint16-LE (0-3)
@@ -59,8 +59,8 @@ UDP payload  (8256 bytes = 64-byte header + 8192-byte data)
     ADC wiring: ADC_TO_ASIC = [3,1,2,0,5,4,7,6]
     ADC_Y_BASE[adc] = (7 - ADC_TO_ASIC[adc]) * 64
 
-UDP packet order per frame (256 packets total):
-  For line_num = 0, 8, 16, ..., 504:
+UDP packet order per frame (512 packets total):
+  For line_num = 0, 8, 16, ..., 1016:
     HYB0, HYB1, HYB2, HYB3
 """
 
@@ -80,7 +80,8 @@ MID_PADDING = b"\x01\x07\x9d\x33\x05\x00\x00\x00\xba\xda\xde"  # 11 bytes
 HEADER_END  = b"\x00\x00" * 13                                   # 28 bytes
 
 #  fixed constants 
-HYB_SIZE          = 512
+HYB_LOCAL_Y      = 512   # local_y range (unchanged)
+HYB_LOCAL_X      = 1024  # local_x range (doubled)
 N_HYBS            = 4
 N_X_PER_PACKET    = 8
 N_MUX             = 64
@@ -94,10 +95,10 @@ TOTAL_PAYLOAD_LEN = HEADER_LEN + ADC_DATA_LEN              # = 8256 bytes
 ADC_TO_ASIC = [3, 1, 2, 0, 5, 4, 7, 6]
 ADC_Y_BASE  = [(7 - ADC_TO_ASIC[adc]) * 64 for adc in range(N_ADC)]
 
-# Pre-computed coordinate lookup tables (shape (4, 512)):
-#   GY_LUT[hyb, local_y] = global Y
-#   GX_LUT[hyb, local_x] = global X
-_ly = np.arange(HYB_SIZE, dtype=np.int32)
+# Pre-computed coordinate lookup tables:
+#   GY_LUT[hyb, local_y] = global Y  (shape 4, 512)
+#   GX_LUT[hyb, local_x] = global X  (shape 4, 1024)
+_ly = np.arange(HYB_LOCAL_Y, dtype=np.int32)
 GY_LUT = np.stack([
      512 + _ly,   # HYB0
        0 + _ly,   # HYB1
@@ -105,26 +106,26 @@ GY_LUT = np.stack([
     1023 - _ly,   # HYB3
 ])  # shape (4, 512)
 
-_lx = np.arange(HYB_SIZE, dtype=np.int32)
+_lx = np.arange(HYB_LOCAL_X, dtype=np.int32)
 GX_LUT = np.stack([
-    512 + _lx,   # HYB0  local_x=511 -> X=1023 (ASIC side)
-    512 + _lx,   # HYB1  local_x=511 -> X=1023 (ASIC side)
-    511 - _lx,   # HYB2  local_x=511 -> X=0    (ASIC side)
-    511 - _lx,   # HYB3  local_x=511 -> X=0    (ASIC side)
-])  # shape (4, 512)
+    1024 + _lx,   # HYB0  local_x=1023 -> X=2047 (ASIC side)
+    1024 + _lx,   # HYB1  local_x=1023 -> X=2047 (ASIC side)
+    1023 - _lx,   # HYB2  local_x=1023 -> X=0    (ASIC side)
+    1023 - _lx,   # HYB3  local_x=1023 -> X=0    (ASIC side)
+])  # shape (4, 1024)
 
 
 def local_to_global_X(hyb: int, local_x: int) -> int:
     if hyb in (0, 1):
-        return 512 + local_x    # local_x=511 -> X=1023 (ASIC side)
+        return 1024 + local_x    # local_x=1023 -> X=2047 (ASIC side)
     else:
-        return 511 - local_x    # local_x=511 -> X=0    (ASIC side)
+        return 1023 - local_x    # local_x=1023 -> X=0    (ASIC side)
 
 
 #  header builder 
 def build_header(local_x0: int, frame32: int, hyb: int) -> bytes:
-    """line_num = 511 - local_x0  (0 when local_x0=511, i.e. ASIC side first)."""
-    line_num = (HYB_SIZE - 1 - local_x0) & 0xFFFF
+    """line_num = 1023 - local_x0  (0 when local_x0=1023, i.e. ASIC side first)."""
+    line_num = (HYB_LOCAL_X - 1 - local_x0) & 0xFFFF
     frame_a  = frame32 & 0xFFFF
     frame_b  = (frame32 >> 16) & 0xFFFF
     return (
@@ -151,23 +152,23 @@ def pack_image_data(mat: np.ndarray, hyb: int, local_x0: int,
                     cm_sigma: float = 0.0) -> bytes:
     """
     Vectorised pack of N_X_PER_PACKET local columns for one HYB.
-    mat[Y, X]: global 1024x1024, Y=0 bottom, Y=1023 top.
+    mat[Y, X]: global 2048x1024, Y=0 bottom, Y=1023 top.
 
     Builds the full 8192-byte block as a single numpy array:
       block[x_step, mux, adc] = mat[gY[local_y], gX[local_x]]
                                   where local_y = _Y_IDX[mux, adc]
     ~50-100x faster than the equivalent Python triple-loop.
     """
-    assert mat.shape == (1024, 1024), f"Expected (1024,1024), got {mat.shape}"
+    assert mat.shape == (2048, 1024), f"Expected (1024,1024), got {mat.shape}"
 
     # local_x values for all x_steps
     local_xs = local_x0 - np.arange(N_X_PER_PACKET, dtype=np.int32)
-    if local_xs.min() < 0 or local_xs.max() >= HYB_SIZE:
+    if local_xs.min() < 0 or local_xs.max() >= HYB_LOCAL_X:
         raise ValueError(f"local_x range out of bounds for local_x0={local_x0}")
 
     # Map local_x -> global X for all x_steps: shape (N_X_PER_PACKET,)
     gX_arr = GX_LUT[hyb, local_xs]   # (8,)
-    # Map local_y -> global Y for all local_y: shape (HYB_SIZE,)
+    # Map local_y -> global Y for all local_y: shape (HYB_LOCAL_X,)
     gY_arr = GY_LUT[hyb]             # (512,)
 
     # Gather full columns from global frame: cols[local_y, x_step]
@@ -270,7 +271,7 @@ def make_pattern_data(pattern: str, state: dict) -> bytes:
 #  main 
 def main():
     ap = argparse.ArgumentParser(
-        description="Mock UDP sender for 1024x1024 CCD (4 HYBs)")
+        description="Mock UDP sender for 2048x1024 CCD (4 HYBs)")
     ap.add_argument("--dst-ip",        default="127.0.0.1")
     ap.add_argument("--dst-port",      type=int,   default=5000)
     ap.add_argument("--interval",      type=float, default=0.001,
@@ -279,32 +280,32 @@ def main():
                     choices=["image", "ramp", "walking1", "aaaa55",
                              "channel_id", "prbs16", "mux_ramp", "local_y_ramp"],
                     default="image")
-    ap.add_argument("--npy",           default="../image/fsp_tng_mpg_hll_1024x1024.npy")
+    ap.add_argument("--npy",           default="../image/fsp_tng_mpg_hll_2048x1024.npy")
     ap.add_argument("--noise-sigma",   type=float, default=10.0)
     ap.add_argument("--cm-sigma",      type=float, default=500.0)
     ap.add_argument("--log-every",     type=float, default=5.0)
     ap.add_argument("--start-frame32", type=int,   default=0)
     args = ap.parse_args()
 
-    print("1024x1024 CCD, 4 HYBs")
-    print("  HYB0: X=512-1023 Y=512-1023  ASICs right (X=1023), local_x=511->0 maps X=1023->512")
-    print("  HYB1: X=512-1023 Y=0-511     ASICs right (X=1023), local_x=511->0 maps X=1023->512")
-    print("  HYB2: X=0-511   Y=0-511      ASICs left  (X=0),    local_x=511->0 maps X=0->511  (180-deg)")
-    print("  HYB3: X=0-511   Y=512-1023   ASICs left  (X=0),    local_x=511->0 maps X=0->511  (180-deg)")
+    print("2048x1024 CCD, 4 HYBs")
+    print("  HYB0: X=1024-2047 Y=512-1023  ASICs right (X=2047), local_x=1023->0 maps X=2047->1024")
+    print("  HYB1: X=1024-2047 Y=0-511     ASICs right (X=2047), local_x=1023->0 maps X=2047->1024")
+    print("  HYB2: X=0-1023   Y=0-511      ASICs left  (X=0),    local_x=1023->0 maps X=0->1023  (180-deg)")
+    print("  HYB3: X=0-1023   Y=512-1023   ASICs left  (X=0),    local_x=1023->0 maps X=0->1023  (180-deg)")
     print(f"  ADC_TO_ASIC={ADC_TO_ASIC}  payload={TOTAL_PAYLOAD_LEN} bytes")
-    print(f"  Packet order: line_num=0..504 step 8, each line: HYB0 HYB1 HYB2 HYB3")
+    print(f"  Packet order: line_num=0..1016 step 8, each line: HYB0 HYB1 HYB2 HYB3")
 
     mat = None
     if args.pattern == "image":
         mat = np.load(args.npy)
-        if mat.shape != (1024, 1024):
-            raise ValueError(f"Expected (1024,1024), got {mat.shape}")
+        if mat.shape != (2048, 1024):
+            raise ValueError(f"Expected (2048,1024), got {mat.shape}")
         mat = mat.astype(np.uint16)
         print(f"Loaded: {args.npy}  min={mat.min()} max={mat.max()}")
 
     sock     = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     frame32  = args.start_frame32 & 0xFFFFFFFF
-    local_x0 = HYB_SIZE - 1   # start at local_x=511 (ASIC side, line_num=0)
+    local_x0 = HYB_LOCAL_X - 1   # start at local_x=1023 (ASIC side, line_num=0)
 
     pattern_states = [{} for _ in range(N_HYBS)]
     sent_total = 0
@@ -344,12 +345,12 @@ def main():
 
         local_x0 -= N_X_PER_PACKET
         if local_x0 < 0:
-            local_x0 = HYB_SIZE - 1
+            local_x0 = HYB_LOCAL_X - 1
             frame32  = (frame32 + 1) & 0xFFFFFFFF
 
         now = time.time()
         if now - t_last >= args.log_every:
-            line_num = HYB_SIZE - 1 - local_x0
+            line_num = HYB_LOCAL_X - 1 - local_x0
             dt   = now - t_last
             rate = sent_since / dt
             print(f"[{now-t0:8.1f}s] pattern={args.pattern:9s}  "

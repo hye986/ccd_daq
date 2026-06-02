@@ -2,7 +2,7 @@
 """
 online_monitor_1024.py
 
-Real-time display of 1024x1024 CCD data from four 512x512 HYBs over UDP.
+Real-time display of 2048x1024 CCD data from four 1024x512 HYBs over UDP.
 
 Display modes (auto-detected, or forced with --display)
 --------------------------------------------------------
@@ -29,12 +29,12 @@ Global coordinate system
 ------------------------
   frame[Y, X],  Y=0 bottom, Y=1023 top.  Displayed with origin='lower'.
 
-HYB local-to-global mapping
-----------------------------
-  HYB0: global X = 512+local_x,  global Y = 512+local_y
-  HYB1: global X = 512+local_x,  global Y =   0+local_y
-  HYB2: global X = 511-local_x,  global Y = 511-local_y
-  HYB3: global X = 511-local_x,  global Y = 1023-local_y
+HYB local-to-global mapping  (2048x1024 frame: X=0..2047, Y=0..1023)
+---------------------------------------------------------------
+  HYB0: global X = 1024+local_x,  global Y = 512+local_y
+  HYB1: global X = 1024+local_x,  global Y =   0+local_y
+  HYB2: global X = 1023-local_x,  global Y = 511-local_y
+  HYB3: global X = 1023-local_x,  global Y = 1023-local_y
 """
 
 import argparse
@@ -58,7 +58,8 @@ HYB_OFF   = 36
 DATA_OFF  = 64
 
 #  fixed constants 
-HYB_SIZE          = 512
+HYB_LOCAL_Y      = 512   # local_y range (unchanged)
+HYB_LOCAL_X      = 1024  # local_x range (doubled)
 N_HYBS            = 4
 N_X_PER_PACKET    = 8
 N_MUX             = 64
@@ -72,11 +73,11 @@ ADC_TO_ASIC = [3, 1, 2, 0, 5, 4, 7, 6]
 ADC_Y_BASE  = [(7 - ADC_TO_ASIC[adc]) * 64 for adc in range(N_ADC)]
 
 
-_ly = np.arange(HYB_SIZE, dtype=np.int32)
+_ly = np.arange(HYB_LOCAL_Y, dtype=np.int32)
 GY_LUT = np.stack([ 512+_ly, _ly, 511-_ly, 1023-_ly ])   # (4, 512)
 
-_lx = np.arange(HYB_SIZE, dtype=np.int32)
-GX_LUT = np.stack([ 512+_lx, 512+_lx, 511-_lx, 511-_lx ])  # (4, 512)
+_lx = np.arange(HYB_LOCAL_X, dtype=np.int32)
+GX_LUT = np.stack([ 1024+_lx, 1024+_lx, 1023-_lx, 1023-_lx ])  # (4, 1024)
 
 SOCK_RCVBUF = 32 * 1024 * 1024
 
@@ -220,7 +221,7 @@ def decode_thread(pkt_queue, buf_pair, buf_lock, active_idx,
     def _write_buf():
         return buf_pair[1 - active_idx[0]]
 
-    got_x           = np.zeros((N_HYBS, HYB_SIZE), dtype=bool)
+    got_x           = np.zeros((N_HYBS, HYB_LOCAL_X), dtype=bool)
     hybs_seen       = set()
     current_frame32 = None
     last_pkt_t      = time.time()
@@ -271,7 +272,7 @@ def decode_thread(pkt_queue, buf_pair, buf_lock, active_idx,
             continue
 
         frame32  = (frame_b << 16) | frame_a
-        local_x0 = (HYB_SIZE - 1 - line_num) & 0x1FF
+        local_x0 = (HYB_LOCAL_X - 1 - line_num) & 0x3FF
         stats['decoded'] += 1
 
         if current_frame32 is None:
@@ -303,7 +304,7 @@ def decode_thread(pkt_queue, buf_pair, buf_lock, active_idx,
 
         gY    = GY_LUT[hyb]
         lxs   = local_x0 - np.arange(N_X_PER_PACKET, dtype=np.int32)
-        valid = (lxs >= 0) & (lxs < HYB_SIZE)
+        valid = (lxs >= 0) & (lxs < HYB_LOCAL_X)
         gXs   = GX_LUT[hyb, lxs[valid]]
         wb    = _write_buf()
         wb[gY[:,None], gXs[None,:]] = strip[:, valid]
@@ -319,7 +320,7 @@ _HTTP_PAGE = """\
 <html>
 <head>
   <meta charset="utf-8">
-  <title>CCD Monitor 1024 — {title}</title>
+  <title>CCD Monitor 2048x1024 — {title}</title>
   <style>
     body {{ background:#111; color:#ccc; font-family:monospace;
            display:flex; flex-direction:column; align-items:center; }}
@@ -344,10 +345,10 @@ def _make_png(frame_arr, vmin, vmax, cmap, stats, pkt_queue, queue_size):
     ax.set_facecolor('#111')
     im = ax.imshow(frame_arr, origin='lower', interpolation='nearest',
                    cmap=cmap, vmin=vmin, vmax=vmax,
-                   extent=[0, 1024, 0, 1024])
+                   extent=[0, 2048, 0, 1024])
     fig.colorbar(im, ax=ax).set_label('ADC value', color='#ccc')
 
-    ax.axvline(512, color='white', lw=0.5, ls='--', alpha=0.4)
+    ax.axvline(1024, color="white", lw=0.5, ls="--", alpha=0.4)
     ax.axhline(512, color='white', lw=0.5, ls='--', alpha=0.4)
     for label, tx, ty in [('HYB0',768,768),('HYB1',768,256),
                            ('HYB2',256,256),('HYB3',256,768)]:
@@ -381,7 +382,7 @@ def run_http_server(http_port, plot_interval, args,
 
     png_lock   = threading.Lock()
     png_cache  = [b'']
-    render_buf = np.zeros((1024, 1024), dtype=np.float32)
+    render_buf = np.zeros((1024, 2048), dtype=np.float32)
 
     def _render_loop():
         while not stop_event.is_set():
@@ -434,7 +435,7 @@ def run_http_server(http_port, plot_interval, args,
             else:
                 ts    = time.strftime('%H:%M:%S')
                 f32   = stats.get('last_frame32', 'waiting...')
-                title = f"1024×1024 CCD | frame {f32} | {ts}"
+                title = f"2048x1024 CCD | frame {f32} | {ts}"
                 body  = _HTTP_PAGE.format(
                     title=title, interval=plot_interval, ts=ts
                 ).encode()
@@ -463,13 +464,13 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
             stats, pkt_queue, stop_event, pedestal=None,
             pixel_mask=None):
     """
-    GUI window with 1024x1024 hit map + marginal projections.
+    GUI window with 1024x1024 hit map + marginal projections (2048x1024).
 
     Layout (gridspec):
       ┌┬┐
       │                 │  y    │  y-projection: mean per row,
       │   hit map       │  proj │  horizontal line, y-axis shared
-      │  (1024x1024)    │       │  with image → parallel to y-axis
+      │  (2048x1024)    │       │  with image → parallel to y-axis
       ├┘       │
       │  x-projection           │
       │  mean per col, vertical │
@@ -484,7 +485,7 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
     import matplotlib.gridspec as gridspec
     import matplotlib.animation as animation
 
-    N = 1024
+    N = 2048
     render_buf = np.zeros((N, N), dtype=np.uint16)
     t_stat     = [time.time()]
     coords     = np.arange(N)
@@ -512,12 +513,12 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
     cbar.set_label('ADC value', fontsize=9)
     cbar.ax.tick_params(labelsize=8)
     title = ax_img.set_title('Waiting for data...', fontsize=9)
-    ax_img.set_xlabel('X  (0=left, 1023=right/ASIC side for HYB0/1)', fontsize=8)
+    ax_img.set_xlabel('X  (0=left, 2047=right/ASIC side for HYB0/1)', fontsize=8)
     ax_img.set_ylabel('Y  (0=bottom, 1023=top)', fontsize=8)
     ax_img.tick_params(labelsize=7)
 
     # HYB boundary guides and labels
-    ax_img.axvline(512, color='white', lw=0.5, ls='--', alpha=0.5)
+    ax_img.axvline(1024, color='white', lw=0.5, ls='--', alpha=0.5)
     ax_img.axhline(512, color='white', lw=0.5, ls='--', alpha=0.5)
     for label, tx, ty in [('HYB0',768,768),('HYB1',768,256),
                            ('HYB2',256,256),('HYB3',256,768)]:
@@ -543,7 +544,7 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
     ax_xprj.tick_params(axis='y', labelsize=7)
     ax_xprj.set_title('x proj', fontsize=8)
     ax_xprj.grid(True, alpha=0.3, lw=0.5)
-    ax_xprj.axvline(512, color='tomato', lw=0.5, ls='--', alpha=0.4)
+    ax_xprj.axvline(1024, color="tomato", lw=0.5, ls='--', alpha=0.4)
 
     def update(_):
         if not frame_ready.is_set():
@@ -596,7 +597,7 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
         n_hybs   = stats.get('last_n_hybs', 0)
         reason   = stats.get('last_publish_reason', '')
         hyb_str  = '  '.join(
-            f"HYB{h}={'OK' if hyb_info.get(h,0)==HYB_SIZE else hyb_info.get(h,0)}"
+            f"HYB{h}={'OK' if hyb_info.get(h,0)==HYB_LOCAL_X else hyb_info.get(h,0)}"
             for h in range(N_HYBS)
         )
         partial  = n_hybs < N_HYBS
@@ -638,7 +639,7 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Online monitor for 1024x1024 CCD UDP stream (4 HYBs)")
+        description="Online monitor for 2048x1024 CCD UDP stream (4 HYBs)")
     ap.add_argument('--bind-ip',       default='127.0.0.1')
     #ap.add_argument('--bind-ip',       default='192.168.100.1')
     ap.add_argument('--port',          type=int,   default=5000)
@@ -675,13 +676,13 @@ def main():
     print(f"Mode: {mode}  backend: {backend}")
 
     global decode_packet
-    decode_packet = make_decoder(mode='1024')
+    decode_packet = make_decoder(mode='2048')
 
     #  pedestal and pixel masks 
     pedestal = None
     if args.pedestal:
         pedestal = np.load(args.pedestal).astype(np.float32)
-        expected = (1024, 1024)
+        expected = (1024, 2048)
         if pedestal.shape != expected:
             print(f"Error: pedestal shape {pedestal.shape} != {expected}")
             return
@@ -693,7 +694,7 @@ def main():
         path = getattr(args, attr, None)
         if path:
             m = np.load(path).astype(bool)
-            if m.shape != (1024, 1024):
+            if m.shape != (1024, 2048):
                 print(f"Error: {label} mask shape {m.shape} != {EXPECTED}")
                 return
             pixel_mask = m if pixel_mask is None else (pixel_mask | m)
@@ -712,8 +713,8 @@ def main():
     # Double-buffer: two pre-allocated frames; decode writes into the
     # inactive one, then swaps active_idx[0] under lock (~1 µs).
     # GUI reads from buf_pair[active_idx[0]] — no 2 MB copy under lock.
-    buf_pair      = [np.zeros((1024, 1024), dtype=np.uint16),
-                     np.zeros((1024, 1024), dtype=np.uint16)]
+    buf_pair      = [np.zeros((1024, 2048), dtype=np.uint16),
+                     np.zeros((1024, 2048), dtype=np.uint16)]
     buf_lock      = threading.Lock()
     active_idx    = [0]   # mutable so decode thread can swap it
     frame_ready   = threading.Event()

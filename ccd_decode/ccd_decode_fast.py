@@ -19,10 +19,10 @@ Public API
 ----------
     from ccd_decode_fast import make_decoder
 
-    decode = make_decoder(mode='512')   # or '1024'
+    decode = make_decoder(mode='512')   # or '1024' or '2048'
 
     # In the decode loop:
-    strip = decode(payload)             # ndarray (512, 8) uint16
+    strip = decode(payload)             # ndarray (1024, 8) uint16
                                         # strip[local_y, x_step]
 """
 
@@ -40,7 +40,8 @@ HYB_OFF   = 36
 N_X_PER_PACKET = 8
 N_MUX          = 64
 N_ADC          = 8
-HYB_SIZE       = 512
+HYB_SIZE       = 512   # strip local_y size (unchanged)
+HYB_LOCAL_X   = 1024  # local_x range for multi-HYB modes (1024, 2048)
 DATA_OFF       = 64
 TOTAL_LEN      = 8256
 
@@ -86,6 +87,12 @@ def _load_c_lib():
                 ctypes.c_int,
                 ctypes.POINTER(ctypes.c_uint16),
             ]
+            lib.decode_strip_2048.restype  = ctypes.c_int
+            lib.decode_strip_2048.argtypes = [
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_uint16),
+            ]
             return lib, path
         except OSError:
             continue
@@ -106,7 +113,7 @@ def _make_c_decoder_512(lib):
     def decode(payload: bytes):
         line_num         = struct.unpack_from('<H',  payload, LINE_OFF)[0]
         frame_a, frame_b = struct.unpack_from('<HH', payload, FRAME_OFF)
-        x0      = (HYB_SIZE - 1 - line_num) & 0x1FF
+        x0      = (HYB_SIZE - 1 - line_num) & 0x3FF
         frame32 = (frame_b << 16) | frame_a
         if fn(payload, len(payload), _ptr) != 0:
             raise ValueError(f"C decode failed: bad payload length {len(payload)}")
@@ -125,7 +132,26 @@ def _make_c_decoder_1024(lib):
         line_num         = struct.unpack_from('<H',  payload, LINE_OFF)[0]
         frame_a, frame_b = struct.unpack_from('<HH', payload, FRAME_OFF)
         hyb              = struct.unpack_from('<H',  payload, HYB_OFF)[0]
-        local_x0         = (HYB_SIZE - 1 - line_num) & 0x1FF
+        local_x0         = (HYB_SIZE - 1 - line_num) & 0x3FF
+        frame32          = (frame_b << 16) | frame_a
+        if fn(payload, len(payload), _ptr) != 0:
+            raise ValueError(f"C decode failed: bad payload length {len(payload)}")
+        return frame32, hyb, local_x0, _strip.copy()
+
+    return decode
+
+
+def _make_c_decoder_2048(lib):
+    """Return a callable that decodes one 2048-mode packet (2048x1024 frame) using the C lib."""
+    fn = lib.decode_strip_2048
+    _strip = np.empty((HYB_SIZE, N_X_PER_PACKET), dtype=np.uint16)
+    _ptr   = _strip.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16))
+
+    def decode(payload: bytes):
+        line_num         = struct.unpack_from('<H',  payload, LINE_OFF)[0]
+        frame_a, frame_b = struct.unpack_from('<HH', payload, FRAME_OFF)
+        hyb              = struct.unpack_from('<H',  payload, HYB_OFF)[0]
+        local_x0         = (HYB_SIZE - 1 - line_num) & 0x3FF
         frame32          = (frame_b << 16) | frame_a
         if fn(payload, len(payload), _ptr) != 0:
             raise ValueError(f"C decode failed: bad payload length {len(payload)}")
@@ -139,7 +165,7 @@ def _make_numpy_decoder_512():
     def decode(payload: bytes):
         line_num         = struct.unpack_from('<H',  payload, LINE_OFF)[0]
         frame_a, frame_b = struct.unpack_from('<HH', payload, FRAME_OFF)
-        x0      = (HYB_SIZE - 1 - line_num) & 0x1FF
+        x0      = (HYB_SIZE - 1 - line_num) & 0x3FF
         frame32 = (frame_b << 16) | frame_a
         raw   = np.frombuffer(payload, dtype='<u2',
                               count=N_X_PER_PACKET * N_MUX * N_ADC,
@@ -158,7 +184,26 @@ def _make_numpy_decoder_1024():
         line_num         = struct.unpack_from('<H',  payload, LINE_OFF)[0]
         frame_a, frame_b = struct.unpack_from('<HH', payload, FRAME_OFF)
         hyb              = struct.unpack_from('<H',  payload, HYB_OFF)[0]
-        local_x0         = (HYB_SIZE - 1 - line_num) & 0x1FF
+        local_x0         = (HYB_SIZE - 1 - line_num) & 0x3FF
+        frame32          = (frame_b << 16) | frame_a
+        raw   = np.frombuffer(payload, dtype='<u2',
+                              count=N_X_PER_PACKET * N_MUX * N_ADC,
+                              offset=DATA_OFF)
+        block = raw.reshape(N_X_PER_PACKET, N_MUX, N_ADC).transpose(1, 2, 0)
+        strip = np.empty((HYB_SIZE, N_X_PER_PACKET), dtype=np.uint16)
+        strip[_Y_IDX.ravel(), :] = block.reshape(N_MUX * N_ADC, N_X_PER_PACKET)
+        return frame32, hyb, local_x0, strip
+
+    return decode
+
+
+def _make_numpy_decoder_2048():
+    """Pure numpy fallback decoder for 2048-mode (2048x1024 frame)."""
+    def decode(payload: bytes):
+        line_num         = struct.unpack_from('<H',  payload, LINE_OFF)[0]
+        frame_a, frame_b = struct.unpack_from('<HH', payload, FRAME_OFF)
+        hyb              = struct.unpack_from('<H',  payload, HYB_OFF)[0]
+        local_x0         = (HYB_SIZE - 1 - line_num) & 0x3FF
         frame32          = (frame_b << 16) | frame_a
         raw   = np.frombuffer(payload, dtype='<u2',
                               count=N_X_PER_PACKET * N_MUX * N_ADC,
@@ -177,20 +222,21 @@ def _make_numpy_decoder_1024():
 
 def make_decoder(mode: str = '512', verbose: bool = True):
     """
-    Return the fastest available decoder for the given mode ('512' or '1024').
+    Return the fastest available decoder for the given mode ('512', '1024', or '2048').
 
     The returned callable has signature:
-        decode(payload: bytes) -> (frame32, x0, strip)          [512 mode]
-        decode(payload: bytes) -> (frame32, hyb, local_x0, strip) [1024 mode]
+        decode(payload: bytes) -> (frame32, x0, strip)               [512 mode]
+        decode(payload: bytes) -> (frame32, hyb, local_x0, strip)   [1024 or 2048 mode]
 
-    strip is always ndarray shape (512, 8), dtype uint16,
+    strip is always ndarray shape (HYB_SIZE, 8), dtype uint16,
     indexed as strip[local_y, x_step].
+    HYB_SIZE is always 512 (strip local_y range); 0x3FF mask is used for all multi-HYB modes (1024, 2048).
 
     The C backend is used if ccd_decode.so is present and loadable;
     otherwise falls back to the numpy vectorised decoder silently.
     """
-    if mode not in ('512', '1024'):
-        raise ValueError(f"mode must be '512' or '1024', got {mode!r}")
+    if mode not in ('512', '1024', '2048'):
+        raise ValueError(f"mode must be '512', '1024', or '2048', got {mode!r}")
 
     lib, path = _load_c_lib()
     if lib is not None:
@@ -198,8 +244,10 @@ def make_decoder(mode: str = '512', verbose: bool = True):
             print(f"Decoder: C backend ({path})")
         if mode == '512':
             return _make_c_decoder_512(lib)
-        else:
+        elif mode == '1024':
             return _make_c_decoder_1024(lib)
+        else:
+            return _make_c_decoder_2048(lib)
     else:
         if verbose:
             print("Decoder: numpy backend (ccd_decode.so not found — "
@@ -207,8 +255,10 @@ def make_decoder(mode: str = '512', verbose: bool = True):
                   "-o ccd_decode.so ccd_decode.c)")
         if mode == '512':
             return _make_numpy_decoder_512()
-        else:
+        elif mode == '1024':
             return _make_numpy_decoder_1024()
+        else:
+            return _make_numpy_decoder_2048()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -225,14 +275,18 @@ if __name__ == '__main__':
 
     print("=== ccd_decode_fast self-test ===\n")
 
-    for mode in ('512', '1024'):
+    for mode in ('512', '1024', '2048'):
         print(f"--- mode={mode} ---")
         decode_c  = make_decoder(mode, verbose=True)
 
         # Force numpy decoder for comparison
         lib, _ = _load_c_lib()
-        decode_np = (_make_numpy_decoder_512 if mode == '512'
-                     else _make_numpy_decoder_1024)()
+        if mode == '512':
+            decode_np = _make_numpy_decoder_512()
+        elif mode == '1024':
+            decode_np = _make_numpy_decoder_1024()
+        else:
+            decode_np = _make_numpy_decoder_2048()
 
         # Correctness
         r_c  = decode_c(payload)
@@ -255,7 +309,7 @@ if __name__ == '__main__':
         for _ in range(N): decode_np(payload)
         py_us = (time.perf_counter() - t0) / N * 1e6
 
-        n_pkt = 64 if mode == '512' else 256
+        n_pkt = {512: 64, 1024: 256, 2048: 512}[int(mode)]
         print(f"  C  backend: {c_us:.2f} µs/pkt  "
               f"=> {1e6/c_us:,.0f} pkt/s  "
               f"=> {1e6/c_us/n_pkt:,.0f} fps")
