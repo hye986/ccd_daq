@@ -485,10 +485,13 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
     import matplotlib.gridspec as gridspec
     import matplotlib.animation as animation
 
-    N = 2048
-    render_buf = np.zeros((N, N), dtype=np.uint16)
+    # Frame is 2048 (X) x 1024 (Y)
+    NX = 2048
+    NY = 1024
+    render_buf = np.zeros((NY, NX), dtype=np.uint16)
     t_stat     = [time.time()]
-    coords     = np.arange(N)
+    x_coords   = np.arange(NX)
+    y_coords   = np.arange(NY)
 
     #  figure layout 
     fig = plt.figure(figsize=(10, 9))
@@ -507,7 +510,7 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
     #  image 
     im    = ax_img.imshow(render_buf, origin='lower', interpolation='nearest',
                           vmin=args.vmin, vmax=args.vmax,
-                          extent=[0, N, 0, N], aspect='auto')
+                          extent=[0, NX, 0, NY], aspect='auto')
     cbar  = fig.colorbar(im, ax=ax_yprj, location='right',
                          fraction=0.15, pad=0.04)
     cbar.set_label('ADC value', fontsize=9)
@@ -526,7 +529,7 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
                     ha='center', va='center', alpha=0.7)
 
     #  y-projection (mean per row, horizontal) 
-    line_yprj, = ax_yprj.plot(np.zeros(N), coords,
+    line_yprj, = ax_yprj.plot(np.zeros(NY), y_coords,
                                color='steelblue', lw=0.8)
     ax_yprj.set_xlabel('mean', fontsize=7)
     ax_yprj.tick_params(axis='y', labelleft=False, labelsize=7)
@@ -537,7 +540,7 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
     ax_yprj.axhline(512, color='steelblue', lw=0.5, ls='--', alpha=0.4)
 
     #  x-projection (mean per col, vertical) 
-    line_xprj, = ax_xprj.plot(coords, np.zeros(N),
+    line_xprj, = ax_xprj.plot(x_coords, np.zeros(NX),
                                color='tomato', lw=0.8)
     ax_xprj.set_ylabel('mean', fontsize=7)
     ax_xprj.tick_params(axis='x', labelbottom=False, labelsize=7)
@@ -582,7 +585,7 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
 
         #  projections 
         y_proj = _disp.mean(axis=1)   # (1024,) mean per row
-        x_proj = _disp.mean(axis=0)   # (1024,) mean per col
+        x_proj = _disp.mean(axis=0)   # (2048,) mean per col
 
         line_yprj.set_xdata(y_proj)
         ax_yprj.set_xlim(y_proj.min() * 0.98 or 0,
