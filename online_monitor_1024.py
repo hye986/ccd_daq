@@ -350,8 +350,8 @@ def _make_png(frame_arr, vmin, vmax, cmap, stats, pkt_queue, queue_size):
 
     ax.axvline(1024, color="white", lw=0.5, ls="--", alpha=0.4)
     ax.axhline(512, color='white', lw=0.5, ls='--', alpha=0.4)
-    for label, tx, ty in [('HYB0',768,768),('HYB1',768,256),
-                           ('HYB2',256,256),('HYB3',256,768)]:
+    for label, tx, ty in [('HYB0',1536,768),('HYB1',1536,256),
+                           ('HYB2',512,256),('HYB3',512,768)]:
         ax.text(tx, ty, label, color='white', fontsize=8,
                 ha='center', va='center', alpha=0.6)
 
@@ -523,8 +523,8 @@ def run_gui(args, buf_pair, buf_lock, active_idx, frame_ready,
     # HYB boundary guides and labels
     ax_img.axvline(1024, color='white', lw=0.5, ls='--', alpha=0.5)
     ax_img.axhline(512, color='white', lw=0.5, ls='--', alpha=0.5)
-    for label, tx, ty in [('HYB0',768,768),('HYB1',768,256),
-                           ('HYB2',256,256),('HYB3',256,768)]:
+    for label, tx, ty in [('HYB0',1536,768),('HYB1',1536,256),
+                           ('HYB2',512,256),('HYB3',512,768)]:
         ax_img.text(tx, ty, label, color='white', fontsize=8,
                     ha='center', va='center', alpha=0.7)
 
