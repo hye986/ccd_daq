@@ -3,13 +3,13 @@
 view_hyb_raw.py
 
 Interactive viewer for per-HYB RAW files written by udp_recorder.py
-with --hyb-raw-output.  Composites up to four 512×512 HYB sub-frames into
-their correct positions in the full 1024×1024 sensor layout and displays the
+with --hyb-raw-output.  Composites up to four 1024×512 HYB sub-frames into
+their correct positions in the full 2048×1024 sensor layout and displays the
 result with the same look-and-feel as view_recording.py.
 
 Sensor layout (top view)
 ------------------------
-  col 0                  col 1023
+  col 0                       col 2047
   +----------+----------+   row 1023
   |  H3      |  H0      |
   | top-left | top-right|
@@ -18,25 +18,25 @@ Sensor layout (top view)
   | bot-left | bot-right|
   +----------+----------+   row 0
 
-HYB RAW file format (same as full-frame RAW but 512 wide)
+HYB RAW file format (same as full-frame RAW but 1024 wide)
 ----------------------------------------------------------
   header      : b'16BU0000'   (8 bytes, once at file start)
   line 0      : 0xFFFF + adc(4B) + 512×uint16   ← frame marker
-  line 1-511  : 0xFFFE + adc(4B) + 512×uint16   ← line markers
+  line 1-1023 : 0xFFFE + adc(4B) + 512×uint16   ← line markers
 
-  line_num 0 = outermost column (x=1023 for H0/H1, x=0 for H2/H3)
+  line_num 0 = outermost column (x=2047 for H0/H1, x=0 for H2/H3)
   local_y  0 = first ADC row (as written by ccd_decode_fast)
 
-Placement into the full frame
-------------------------------
-  H0 (hyb=0, top-right):    rows 512-1023, cols 512-1023
-                             line 0 → col 1023, line 511 → col 512
-  H1 (hyb=1, bot-right):    rows   0-511,  cols 512-1023
-                             line 0 → col 1023, line 511 → col 512
-  H2 (hyb=2, bot-left):     rows   0-511,  cols   0-511
-                             line 0 → col   0, line 511 → col 511
-  H3 (hyb=3, top-left):     rows 512-1023, cols   0-511
-                             line 0 → col   0, line 511 → col 511
+Placement into the full frame (2048x1024)
+-----------------------------------------
+  H0 (hyb=0, top-right):    rows 512-1023, cols 1024-2047
+                             line 0 → col 2047, line 1023 → col 1024
+  H1 (hyb=1, bot-right):    rows   0-511,  cols 1024-2047
+                             line 0 → col 2047, line 1023 → col 1024
+  H2 (hyb=2, bot-left):     rows   0-511,  cols   0-1023
+                             line 0 → col   0, line 1023 → col 1023
+  H3 (hyb=3, top-left):     rows 512-1023, cols   0-1023
+                             line 0 → col   0, line 1023 → col 1023
 
   local_y maps to the global row via GY_LUT[hyb]:
     H0: GY = 512 + local_y   (rows 512..1023)
@@ -76,40 +76,47 @@ import matplotlib.widgets as mwidgets
 
 # ── sensor constants ─────────────────────────────────────────────────────────
 
-HYB_SIZE = 512
-FRAME_H  = 1024
-FRAME_W  = 1024
+# HYB dimensions for 2048x1024 frame mode
+HYB_LOCAL_X = 1024  # local_x range (1024 lines per HYB in RAW)
+HYB_LOCAL_Y = 512   # local_y range (512 pixels per line)
+FRAME_H  = 1024      # frame height (Y)
+FRAME_W  = 2048      # frame width (X)
 
 RAW_HEADER       = b'16BU0000'
 RAW_HEADER_LEN   = 8
 RAW_FRAME_MARKER = 0xFFFF
 RAW_LINE_MARKER  = 0xFFFE
 
-# Record layout: marker(u16) + adc_counter(u32) + HYB_SIZE×u16 pixels
+# Record layout: marker(u16) + adc_counter(u32) + HYB_LOCAL_Y×u16 pixels
 _REC_DTYPE = np.dtype([
     ('marker', '<u2'),
     ('adc',    '<u4'),
-    ('pix',    '<u2', (HYB_SIZE,)),
+    ('pix',    '<u2', (HYB_LOCAL_Y,)),
 ])
 REC_SIZE   = _REC_DTYPE.itemsize    # 2 + 4 + 512*2 = 1030 bytes
-FRAME_RECS = HYB_SIZE               # 512 records per frame
+FRAME_RECS = HYB_LOCAL_X            # 1024 records per frame
 FRAME_BYTES = FRAME_RECS * REC_SIZE  # bytes per frame in HYB RAW file
 
-# GY_LUT[hyb, local_y] → global row in 1024×1024 frame
-_ly   = np.arange(HYB_SIZE, dtype=np.int32)
+# GY_LUT[hyb, local_y] → global row in 2048×1024 frame
+# local_y: 0-511 maps to global Y via:
+#   H0: 512 + local_y  → rows 512-1023
+#   H1: 0 + local_y    → rows 0-511
+#   H2: 511 - local_y  → rows 511-0 (flipped)
+#   H3: 1023 - local_y → rows 1023-512 (flipped)
+_ly   = np.arange(HYB_LOCAL_Y, dtype=np.int32)
 GY_LUT = np.stack([512 + _ly,        # H0: rows 512-1023
                    _ly,               # H1: rows 0-511
                    511 - _ly,         # H2: rows 511-0 (flipped)
                    1023 - _ly])       # H3: rows 1023-512 (flipped)
 
-# GX placement: line 0 = outermost column
-#   H0/H1: line l → global col 1023 - l
-#   H2/H3: line l → global col l
+# GX placement: line 0 = outermost column (ASIC side)
+#   H0/H1: line l → global col 2047 - l (right side, col decreases)
+#   H2/H3: line l → global col l     (left side, col increases)
 def _line_to_gcol(hyb: int, line: int) -> int:
     if hyb in (0, 1):
-        return FRAME_W - 1 - line
+        return FRAME_W - 1 - line  # 2047, 2046, ..., 1024
     else:
-        return line
+        return line                  # 0, 1, ..., 1023
 
 
 # ── HYB name ↔ hyb index ────────────────────────────────────────────────────
@@ -128,7 +135,7 @@ class HybRawFile:
     Memory-mapped reader for one per-HYB RAW file.
 
     The file layout is:
-      [8-byte header] [512 records per frame] × n_frames
+      [8-byte header] [1024 records per frame] × n_frames
 
     Each record: marker(u16) + adc(u32) + 512×u16 pixels.
     Records within a frame are indexed by line_num (0..511).
@@ -176,20 +183,20 @@ class HybRawFile:
 
     def read_hyb_frame(self, viewer_idx: int) -> np.ndarray:
         """
-        Return the HYB sub-frame at viewer index as uint16 (HYB_SIZE, HYB_SIZE).
+        Return the HYB sub-frame at viewer index as uint16 (HYB_LOCAL_X, HYB_LOCAL_Y).
 
-        Shape: (HYB_SIZE, HYB_SIZE) = (512, 512)
+        Shape: (HYB_LOCAL_X, HYB_LOCAL_Y) = (1024, 512)
           axis 0: local_y  — maps to global row via GY_LUT[hyb]
           axis 1: line_num — maps to global col via _line_to_gcol(hyb, l)
 
-        Records are stored in line order 0→511 (outermost col first).
+        Records are stored in line order 0→1023 (outermost col first).
         """
         raw_idx  = int(self._indices[viewer_idx])
         start    = raw_idx * FRAME_RECS
-        records  = self._mmap[start : start + FRAME_RECS]   # shape (512,)
-        # records['pix'] shape: (512, 512)  — axis0=line_num, axis1=local_y
+        records  = self._mmap[start : start + FRAME_RECS]   # shape (1024,)
+        # records['pix'] shape: (1024, 512)  — axis0=line_num, axis1=local_y
         # We want (local_y, line_num) → transpose
-        return records['pix'].T.copy()   # (HYB_SIZE, HYB_SIZE)
+        return records['pix'].T.copy()   # (HYB_LOCAL_Y, HYB_LOCAL_X)
 
     def completeness(self, viewer_idx: int) -> tuple:
         """Return (n_missing_lines, marker_ok) for a frame."""
@@ -211,7 +218,7 @@ class HybRawFile:
 
 class HybRecording:
     """
-    Composites up to four HybRawFile objects into a full 1024×1024 frame.
+    Composites up to four HybRawFile objects into a full 2048×1024 frame.
 
     Only the loaded HYBs are populated; the rest of the canvas stays at 0.
     If only a subset of HYBs is loaded, the displayed extent is cropped to
@@ -279,13 +286,13 @@ class HybRecording:
             gy = GY_LUT[hyb]           # (512,) global rows for this HYB
             row_lo = min(row_lo, int(gy.min()))
             row_hi = max(row_hi, int(gy.max()) + 1)
-            # cols: line 0 → outermost, line 511 → innermost
-            if hyb in (0, 1):          # right half: cols 512-1023
-                col_lo = min(col_lo, HYB_SIZE)
+            # cols: line 0 → outermost, line 1023 → innermost
+            if hyb in (0, 1):          # right half: cols 1024-2047
+                col_lo = min(col_lo, HYB_LOCAL_X)
                 col_hi = max(col_hi, FRAME_W)
-            else:                       # left half: cols 0-511
+            else:                       # left half: cols 0-1023
                 col_lo = min(col_lo, 0)
-                col_hi = max(col_hi, HYB_SIZE)
+                col_hi = max(col_hi, HYB_LOCAL_X)
 
         self.row_lo = row_lo
         self.row_hi = row_hi
@@ -304,20 +311,20 @@ class HybRecording:
         canvas = np.zeros((FRAME_H, FRAME_W), dtype=np.float32)
 
         for hyb, reader in self.readers.items():
-            sub = reader.read_hyb_frame(idx)   # (HYB_SIZE, HYB_SIZE) uint16
+            sub = reader.read_hyb_frame(idx)   # (HYB_LOCAL_Y, HYB_LOCAL_X) uint16
             # sub[local_y, line_num]
             # Place into canvas:
             #   global row = GY_LUT[hyb, local_y]
             #   global col = _line_to_gcol(hyb, line_num)
             gy = GY_LUT[hyb]   # (512,)
             if hyb in (0, 1):
-                # cols 512-1023, line 0→col 1023, line 511→col 512
-                # i.e. global col = 1023 - line_num
-                # sub[:, line_num] → canvas[gy, 1023-line_num]
-                gcols = FRAME_W - 1 - np.arange(HYB_SIZE, dtype=np.int32)
+                # cols 1024-2047, line 0→col 2047, line 1023→col 1024
+                # i.e. global col = 2047 - line_num
+                # sub[:, line_num] → canvas[gy, 2047-line_num]
+                gcols = FRAME_W - 1 - np.arange(HYB_LOCAL_X, dtype=np.int32)
             else:
-                # cols 0-511, line 0→col 0, line 511→col 511
-                gcols = np.arange(HYB_SIZE, dtype=np.int32)
+                # cols 0-1023, line 0→col 0, line 1023→col 1023
+                gcols = np.arange(HYB_LOCAL_X, dtype=np.int32)
 
             canvas[gy[:, None], gcols[None, :]] = sub.astype(np.float32)
 
@@ -455,8 +462,8 @@ class Viewer:
         if r.row_lo < 512 < r.row_hi:
             self.ax_img.axhline(512, **lkw)
         # Vertical boundary (col 512) if both halves are visible
-        if r.col_lo < 512 < r.col_hi:
-            self.ax_img.axvline(512, **lkw)
+        if r.col_lo < 1024 < r.col_hi:
+            self.ax_img.axvline(1024, **lkw)
         # HYB labels
         label_kw = dict(color='#8899bb', fontsize=7, alpha=0.7,
                         ha='center', va='center')
@@ -642,7 +649,7 @@ class Viewer:
 
 def main():
     ap = argparse.ArgumentParser(
-        description='View per-HYB RAW files composited into a 1024×1024 frame',
+        description='View per-HYB RAW files composited into a 2048×1024 frame',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
