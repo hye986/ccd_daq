@@ -468,8 +468,8 @@ class Viewer:
         label_kw = dict(color='#8899bb', fontsize=7, alpha=0.7,
                         ha='center', va='center')
         centers = {
-            'H0': (768, 768), 'H1': (768, 256),
-            'H2': (256, 256), 'H3': (256, 768),
+            'H0': (1536, 768), 'H1': (1536, 256),
+            'H2': (512, 256), 'H3': (512, 768),
         }
         for name, (cx, cy) in centers.items():
             hyb = NAME_TO_HYB[name]
