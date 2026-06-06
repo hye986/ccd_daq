@@ -152,6 +152,15 @@ import sys
 sys.path.append('./ccd_decode')
 from ccd_decode_fast import make_decoder, _load_c_lib
 
+
+def _ensure_dir(path: str):
+    """Create output directory if it doesn't exist."""
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d)
+        print(f"  Created output directory: {d}")
+
+
 #  protocol constants 
 LINE_OFF  = 28
 FRAME_OFF = 30
@@ -844,6 +853,7 @@ def raw_writer_thread_fn(frm_queue, stop_event, stats, args, height, width,
     if selected_hybs:
         for name, hyb in selected_hybs:
             path = args.hyb_raw_output.replace('{H}', name)
+            _ensure_dir(path)
             fh = open(path, 'wb', buffering=1024 * 1024)
             fh.write(RAW_HEADER)
             hyb_files[name] = (fh, hyb)
@@ -863,6 +873,7 @@ def raw_writer_thread_fn(frm_queue, stop_event, stats, args, height, width,
     raw_f = None
     try:
         if args.raw_output:
+            _ensure_dir(args.raw_output)
             raw_f = open(args.raw_output, 'wb', buffering=1024 * 1024)
             raw_f.write(RAW_HEADER)
 
@@ -991,6 +1002,7 @@ def writer_thread_fn(frm_queue, stop_event, stats, args, height, width,
 
     raw_f = None
     if args.raw_output:
+        _ensure_dir(args.raw_output)
         raw_f = open(args.raw_output, 'wb', buffering=1024 * 1024)
         raw_f.write(RAW_HEADER)
 
@@ -1001,6 +1013,7 @@ def writer_thread_fn(frm_queue, stop_event, stats, args, height, width,
     if selected_hybs and not getattr(args, '_direct_hyb', False):
         for name, hyb in selected_hybs:
             path = args.hyb_raw_output.replace('{H}', name)
+            _ensure_dir(path)
             fh = open(path, 'wb', buffering=1024 * 1024)
             fh.write(RAW_HEADER)
             hyb_files[name] = (fh, hyb)
@@ -1497,6 +1510,7 @@ def main():
         hyb_files = {}   # name -> (file_handle, hyb_index)
         for name, hyb in selected_hybs:
             path = args.hyb_raw_output.replace('{H}', name)
+            _ensure_dir(path)
             fh = open(path, 'wb', buffering=1024 * 1024)
             fh.write(RAW_HEADER)
             hyb_files[name] = (fh, hyb)
